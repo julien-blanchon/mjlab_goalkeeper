@@ -1,0 +1,37 @@
+name: goalkeeper-task
+
+# Working directory (optional) containing the project codebase.
+# Its contents are synced to ~/sky_workdir/ on the cluster.
+workdir: .
+
+num_nodes: 1
+resources:
+  infra: lambda
+  accelerators: A100:1 # 1x NVIDIA A100 GPU
+  use_spot: false
+  ports: 8080 # Export nerfstudio-project/viser port (for play) just in case
+  # Down the instance after 10 minutes of inactivity
+  autostop:
+    idle_minutes: 10
+    down: true # Use autodown instead of autostop
+
+# file_mounts:
+#   # Sync a local directory to a remote directory
+#   /home/outputs: ./outputs/
+
+# Both WANDB_API_KEY is required for the setup to work.
+secrets:
+  WANDB_API_KEY: null
+
+envs:
+  MUJOCO_GL: egl
+
+# Commands to be run before executing the job.
+setup: |
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  uvx wandb login --relogin ${WANDB_API_KEY}
+  uv sync
+
+# Commands to run as a job.
+run: |
+  uv run train Mjlab-Goalkeeper --env.scene.num-envs 4096 --video True
