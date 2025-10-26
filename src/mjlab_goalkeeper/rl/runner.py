@@ -1,4 +1,4 @@
-import os
+from pathlib import Path
 
 import wandb
 from rsl_rl.runners import OnPolicyRunner
@@ -18,7 +18,7 @@ class VelocityOnPolicyRunner(OnPolicyRunner):
         super().save(path, infos)
         if self.logger_type in ["wandb"]:
             policy_path = path.split("model")[0]
-            filename = os.path.basename(os.path.dirname(policy_path)) + ".onnx"
+            filename = (Path(policy_path).stem + ".onnx").name
             if self.alg.policy.actor_obs_normalization:
                 normalizer = self.alg.policy.actor_obs_normalizer
             else:
@@ -35,4 +35,4 @@ class VelocityOnPolicyRunner(OnPolicyRunner):
                 path=policy_path,
                 filename=filename,
             )
-            wandb.save(policy_path + filename, base_path=os.path.dirname(policy_path))
+            wandb.save(policy_path + filename, base_path=Path(policy_path).parent)

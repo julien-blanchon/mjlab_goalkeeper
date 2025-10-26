@@ -4,7 +4,7 @@
 import torch
 
 from mjlab.envs import ManagerBasedRlEnv
-from mjlab_goalkeeper.config.env_cfg import UnitreeG1FlatEnvCfg
+from mjlab_goalkeeper.config.env_cfg import UnitreeG1GoalkeeperEnvCfg
 
 
 def test_goalkeeper_environment():
@@ -15,7 +15,7 @@ def test_goalkeeper_environment():
 
     # Create environment (use CUDA for speed)
     print("\n[1/6] Creating environment...")
-    env_cfg = UnitreeG1FlatEnvCfg()
+    env_cfg = UnitreeG1GoalkeeperEnvCfg()
     env = ManagerBasedRlEnv(cfg=env_cfg, device="cuda:0")
     print("✓ Environment created successfully")
 

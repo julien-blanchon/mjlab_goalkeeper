@@ -9,7 +9,7 @@ resources:
   infra: lambda
   accelerators: A100:1 # 1x NVIDIA A100 GPU
   use_spot: false
-  ports: 8080 # Export nerfstudio-project/viser port (for play) just in case
+  # ports: 8080 # Export nerfstudio-project/viser port (for play) (not needed for now)
   # Down the instance after 10 minutes of inactivity
   autostop:
     idle_minutes: 10
@@ -19,19 +19,25 @@ resources:
 #   # Sync a local directory to a remote directory
 #   /home/outputs: ./outputs/
 
-# Both WANDB_API_KEY is required for the setup to work.
+# WANDB_API_KEY is required for the setup to work.
 secrets:
-  WANDB_API_KEY: null
-
-envs:
-  MUJOCO_GL: egl
+  WANDB_API_KEY: null # The API key for the WandB API
 
 # Commands to be run before executing the job.
 setup: |
+  curl -L https://lambdalabs-guest-agent.s3.us-west-2.amazonaws.com/scripts/install.sh | sudo bash
+  sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libgles2
   curl -LsSf https://astral.sh/uv/install.sh | sh
-  uvx wandb login --relogin ${WANDB_API_KEY}
+  uvx wandb login --relogin ${WANDB_API_KEY} 
   uv sync
 
 # Commands to run as a job.
 run: |
-  uv run train Mjlab-Goalkeeper --env.scene.num-envs 4096 --video True
+  MUJOCO_GL=egl uv run train Mjlab-Goalkeeper \
+    --env.is-finite-horizon True \
+    --env.scene.num-envs 4096 \
+    --device cuda:0 \
+    --agent.seed 42 \
+    --agent.logger wandb \
+    --agent.wandb-project mjlab-goalkeeper \
+    --video True &

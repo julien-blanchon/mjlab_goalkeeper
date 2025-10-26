@@ -494,7 +494,7 @@ class TerminationCfg:
 ##
 
 @dataclass
-class UnitreeG1FlatEnvCfg(ManagerBasedRlEnvCfg):
+class UnitreeG1GoalkeeperEnvCfg(ManagerBasedRlEnvCfg):
     """Main environment configuration."""
 
     scene: SceneCfg = field(default_factory=lambda: SCENE_CFG)
@@ -700,7 +700,7 @@ gym.register(
     entry_point="mjlab.envs:ManagerBasedRlEnv",
     disable_env_checker=True,
     kwargs={
-        "env_cfg_entry_point": f"{__name__}.config.env_cfg:UnitreeG1FlatEnvCfg",
+        "env_cfg_entry_point": f"{__name__}.config.env_cfg:UnitreeG1GoalkeeperEnvCfg",
         "rl_cfg_entry_point": f"{__name__}.config.rl_cfg:UnitreeG1PPORunnerCfg",
     },
 )

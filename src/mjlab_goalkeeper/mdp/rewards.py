@@ -370,3 +370,37 @@ class goal_prevented_by_robot:
         if env_ids is None:
             env_ids = slice(None)
         self.has_touched_ball[env_ids] = False
+
+
+def robot_ball_contact_reward(
+    env: ManagerBasedRlEnv,
+    threshold: float = 0.5,
+) -> torch.Tensor:
+    """Reward function for robot-ball contact (returns scalar per env).
+
+    Args:
+        env: The environment.
+        threshold: Distance threshold in meters for contact detection.
+
+    Returns:
+        Binary tensor of shape (num_envs,). 1.0 if contact, 0.0 otherwise.
+    """
+    # Import here to use observation function
+    from mjlab_goalkeeper.mdp.observations import robot_ball_contact
+
+    return robot_ball_contact(env, threshold=threshold).squeeze(-1)
+
+
+def goal_prevented_reward(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """Reward function for preventing goals (returns scalar per env).
+
+    Args:
+        env: The environment.
+
+    Returns:
+        Tensor of shape (num_envs,). 0.0 if goal scored, 1.0 otherwise.
+    """
+    # Import here to use observation function
+    from mjlab_goalkeeper.mdp.observations import goal_scored_detection
+
+    return 1.0 - goal_scored_detection(env).squeeze(-1)

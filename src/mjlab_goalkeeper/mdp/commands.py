@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-import numpy as np
 import torch
 
 from mjlab.entity import Entity
@@ -15,237 +14,6 @@ from mjlab.managers.manager_term_config import CommandTermCfg
 if TYPE_CHECKING:
     from mjlab.envs.manager_based_rl_env import ManagerBasedRlEnv
     from mjlab.viewer.debug_visualizer import DebugVisualizer
-
-
-class FootballThrowCommand(CommandTerm):
-    """Command term that periodically throws a football at the robot.
-
-    This command manages the trajectory of a football ball, periodically
-    resetting it to a throwing position and giving it velocity toward the robot.
-    Provides goalkeeper training scenarios with incoming balls.
-    """
-
-    cfg: FootballThrowCommandCfg
-
-    def __init__(self, cfg: FootballThrowCommandCfg, env: ManagerBasedRlEnv):
-        super().__init__(cfg, env)
-
-        self.robot: Entity = env.scene[cfg.robot_name]
-        self.football: Entity = env.scene[cfg.football_name]
-
-        # Store current throw parameters for each environment
-        self.throw_position = torch.zeros(self.num_envs, 3, device=self.device)
-        self.throw_velocity = torch.zeros(self.num_envs, 3, device=self.device)
-        self.target_position = torch.zeros(self.num_envs, 3, device=self.device)
-
-        # Metrics
-        self.metrics["throws_count"] = torch.zeros(self.num_envs, device=self.device)
-        self.metrics["time_since_throw"] = torch.zeros(
-            self.num_envs, device=self.device
-        )
-
-    @property
-    def command(self) -> torch.Tensor:
-        """Return the throw velocity command (for consistency with command interface)."""
-        return self.throw_velocity
-
-    def _update_metrics(self) -> None:
-        """Update time since last throw."""
-        self.metrics["time_since_throw"] += self._env.step_dt
-
-    def _resample_command(self, env_ids: torch.Tensor) -> None:
-        """Throw the football for the specified environments.
-
-        This samples new throw parameters and resets the football position/velocity.
-        """
-        num_envs = len(env_ids)
-
-        # Get environment origins (throws are relative to origin, not robot)
-        env_origins = self._env.scene.env_origins[env_ids]  # (num_envs, 3)
-
-        # Get robot positions to aim at
-        robot_pos = self.robot.data.root_link_pos_w[env_ids]  # (num_envs, 3)
-
-        # Sample throw starting position (each variable needs its own random sample)
-        # Distance from origin (not robot, so throws come from consistent positions)
-        distance = torch.empty(num_envs, device=self.device).uniform_(
-            *self.cfg.ranges.distance
-        )
-
-        # Angle around origin (in XY plane)
-        angle = torch.empty(num_envs, device=self.device).uniform_(
-            *self.cfg.ranges.angle
-        )
-
-        # Height above ground
-        height = torch.empty(num_envs, device=self.device).uniform_(
-            *self.cfg.ranges.height
-        )
-
-        # Calculate throw position relative to environment origin
-        x = distance * torch.cos(angle)
-        y = distance * torch.sin(angle)
-        z = height
-
-        throw_pos_local = torch.stack([x, y, z], dim=-1)
-
-        # Add to environment origin (throw from fixed world positions)
-        throw_pos = env_origins + throw_pos_local
-
-        # Target position: robot position with some randomization
-        target_offset_x = torch.empty(num_envs, device=self.device).uniform_(
-            *self.cfg.ranges.target_offset_x
-        )
-        target_offset_y = torch.empty(num_envs, device=self.device).uniform_(
-            *self.cfg.ranges.target_offset_y
-        )
-        target_offset_z = torch.empty(num_envs, device=self.device).uniform_(
-            *self.cfg.ranges.target_offset_z
-        )
-
-        target_offset = torch.stack(
-            [target_offset_x, target_offset_y, target_offset_z], dim=-1
-        )
-        target_pos = robot_pos + target_offset
-
-        # Calculate required velocity to reach target
-        # Using simple projectile motion: v = (target - start) / t
-        throw_time = torch.empty(num_envs, device=self.device).uniform_(
-            *self.cfg.ranges.throw_time
-        )
-        direction = target_pos - throw_pos
-
-        # Add gravity compensation in Z direction
-        # For ballistic trajectory: z_vel = (Δz + 0.5*g*t²) / t
-        gravity = 9.81  # m/s²
-        throw_vel = direction.clone()
-        throw_vel[:, :2] = direction[:, :2] / throw_time.unsqueeze(
-            -1
-        )  # XY: constant velocity
-        throw_vel[:, 2] = (
-            direction[:, 2] + 0.5 * gravity * throw_time**2
-        ) / throw_time  # Z: compensate gravity
-
-        # Store for visualization
-        self.throw_position[env_ids] = throw_pos
-        self.throw_velocity[env_ids] = throw_vel
-        self.target_position[env_ids] = target_pos
-
-        # Set football position and velocity
-        orientations = torch.zeros(num_envs, 4, device=self.device)
-        orientations[:, 0] = 1.0  # Identity quaternion
-
-        ang_vel = torch.zeros(num_envs, 3, device=self.device)
-
-        # Combine into root state [pos(3), quat(4), lin_vel(3), ang_vel(3)]
-        root_state = torch.cat([throw_pos, orientations, throw_vel, ang_vel], dim=-1)
-
-        # Write to simulation
-        self.football.write_root_state_to_sim(root_state, env_ids=env_ids)
-
-        # Update metrics
-        self.metrics["throws_count"][env_ids] += 1
-        self.metrics["time_since_throw"][env_ids] = 0.0
-
-    def _update_command(self) -> None:
-        """Update command state (called every step)."""
-        # Nothing to update - throw parameters are set on resample
-        pass
-
-    # Visualization
-
-    def _debug_vis_impl(self, visualizer: "DebugVisualizer") -> None:
-        """Visualize the throw trajectory.
-
-        Draws:
-        - Throw velocity vector (orange arrow from throw position)
-        - Trajectory path to target (thin orange arrow)
-        - Target marker (small green arrow pointing up)
-        """
-        batch = visualizer.env_idx
-
-        if batch >= self.num_envs:
-            return
-
-        throw_pos = self.throw_position[batch].cpu().numpy()
-        throw_vel = self.throw_velocity[batch].cpu().numpy()
-        target_pos = self.target_position[batch].cpu().numpy()
-
-        # Skip if not initialized (all zeros)
-        if np.linalg.norm(throw_pos) < 1e-6:
-            return
-
-        # Draw velocity vector (thick orange arrow showing throw direction and speed)
-        vel_scale = 0.4  # Scale factor for visibility
-        vel_end = throw_pos + throw_vel * vel_scale
-        visualizer.add_arrow(throw_pos, vel_end, color=(0.9, 0.5, 0.1, 0.9), width=0.03)
-
-        # Draw trajectory path to target (thin orange arrow)
-        if self.cfg.viz.show_trajectory:
-            visualizer.add_arrow(
-                throw_pos, target_pos, color=(0.9, 0.5, 0.1, 0.4), width=0.01
-            )
-
-        # Draw target marker (small upward-pointing green arrow)
-        target_marker_end = target_pos + np.array([0.0, 0.0, 0.3])
-        visualizer.add_arrow(
-            target_pos, target_marker_end, color=(0.2, 0.8, 0.2, 0.8), width=0.02
-        )
-
-
-@dataclass(kw_only=True)
-class FootballThrowCommandCfg(CommandTermCfg):
-    """Configuration for football throw command term.
-
-    This command periodically throws a football at the robot from a randomized
-    position with randomized velocity, creating realistic goalkeeper scenarios.
-    """
-
-    robot_name: str = "robot"
-    """Name of the robot entity to target."""
-
-    football_name: str = "football_ball"
-    """Name of the football entity to throw."""
-
-    @dataclass
-    class Ranges:
-        """Ranges for throw parameters."""
-
-        distance: tuple[float, float] = (8.0, 15.0)
-        """Distance from robot to throw from (meters)."""
-
-        angle: tuple[float, float] = (-3.14159, 3.14159)
-        """Angle around robot to throw from (radians, full circle)."""
-
-        height: tuple[float, float] = (2.0, 5.0)
-        """Height above ground to throw from (meters)."""
-
-        throw_time: tuple[float, float] = (1.0, 2.0)
-        """Time for ball to reach target (seconds)."""
-
-        target_offset_x: tuple[float, float] = (-0.5, 0.5)
-        """X offset from robot position for aiming (meters)."""
-
-        target_offset_y: tuple[float, float] = (-0.5, 0.5)
-        """Y offset from robot position for aiming (meters)."""
-
-        target_offset_z: tuple[float, float] = (0.5, 1.5)
-        """Z offset from robot position for aiming (meters, torso height)."""
-
-    ranges: Ranges = field(default_factory=Ranges)
-    """Randomization ranges for throw parameters."""
-
-    @dataclass
-    class VizCfg:
-        """Visualization configuration."""
-
-        show_trajectory: bool = True
-        """Whether to show the trajectory line."""
-
-    viz: VizCfg = field(default_factory=VizCfg)
-    """Visualization settings."""
-
-    class_type: type[CommandTerm] = FootballThrowCommand
 
 
 class PenaltyKickCommand(CommandTerm):
@@ -393,12 +161,12 @@ class PenaltyKickCommand(CommandTerm):
         if batch >= self.num_envs:
             return
 
-        ball_pos = self.ball_start_pos[batch].cpu().numpy()
-        kick_vel = self.kick_velocity[batch].cpu().numpy()
-        target_pos = self.target_position[batch].cpu().numpy()
+        ball_pos = self.ball_start_pos[batch]
+        kick_vel = self.kick_velocity[batch]
+        target_pos = self.target_position[batch]
 
         # Skip if not initialized (all zeros)
-        if np.linalg.norm(kick_vel) < 1e-6:
+        if torch.norm(kick_vel) < 1e-6:
             return
 
         # Draw velocity vector (thick red arrow showing kick direction and speed)
@@ -413,7 +181,9 @@ class PenaltyKickCommand(CommandTerm):
             )
 
         # Draw target marker (small green arrow at target)
-        target_marker_end = target_pos + np.array([0.0, 0.0, 0.2])
+        target_marker_end = target_pos + torch.tensor(
+            [0.0, 0.0, 0.2], device=self.device
+        )
         visualizer.add_arrow(
             target_pos, target_marker_end, color=(0.2, 0.8, 0.2, 0.8), width=0.02
         )

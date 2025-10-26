@@ -8,7 +8,7 @@ from mjlab.rl import (
 
 
 @dataclass
-class UnitreeG1PPORunnerCfg(RslRlOnPolicyRunnerCfg):
+class UnitreeG1GoalkeeperPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     policy: RslRlPpoActorCriticCfg = field(
         default_factory=lambda: RslRlPpoActorCriticCfg(
             init_noise_std=1.0,
@@ -35,7 +35,8 @@ class UnitreeG1PPORunnerCfg(RslRlOnPolicyRunnerCfg):
             max_grad_norm=1.0,
         )
     )
-    experiment_name: str = "g1_velocity"
+    experiment_name: str = "goalkeeper"
+    wandb_project: str = "mjlab-goalkeeper"
     save_interval: int = 50
     num_steps_per_env: int = 24
     max_iterations: int = 30_000

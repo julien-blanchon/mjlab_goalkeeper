@@ -5,7 +5,7 @@ A custom mjlab environment for training a Unitree G1 humanoid robot as a goalkee
 ## Run with skypilot
 
 ```bash
-sky launch -c goalkeeper-task sky_task.yaml --env-file .env
+sky launch -d -c goalkeeper-task sky_task.yaml --secret WANDB_API_KEY=<your_wandb_api_key>
 ```
 
 ## Features
