@@ -38,6 +38,9 @@ class PenaltyKickCommand(CommandTerm):
         self.target_position = torch.zeros(self.num_envs, 3, device=self.device)
         self.ball_start_pos = torch.zeros(self.num_envs, 3, device=self.device)
 
+        # Store interception point (where robot should move to) in LOCAL coordinates
+        self.interception_x_local = torch.zeros(self.num_envs, device=self.device)
+
         # Metrics
         self.metrics["kicks_count"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["time_since_kick"] = torch.zeros(self.num_envs, device=self.device)
@@ -118,7 +121,27 @@ class PenaltyKickCommand(CommandTerm):
         # Vertical velocity (Z axis, compensate for gravity)
         kick_vel[:, 2] = (vertical_dist + 0.5 * gravity * kick_time**2) / kick_time
 
-        # Store for visualization
+        # Compute interception X position (where robot should move to)
+        # This is where ball crosses the ROBOT'S goal line (y=-0.3 in local coords)
+        robot_goal_line_y = -0.3  # Where robot stands
+        env_origins = self._env.scene.env_origins[env_ids]
+        robot_goal_line_y_world = env_origins[:, 1] + robot_goal_line_y
+
+        # Predict where ball crosses robot's goal line
+        dy_robot = robot_goal_line_y_world - ball_start_pos[:, 1]
+        kick_vel_y = kick_vel[:, 1].clamp(max=-0.01)
+        time_to_robot_line = dy_robot / (kick_vel_y - 1e-8)
+
+        # Predicted X at robot's goal line (LOCAL coordinates)
+        predicted_x_world = ball_start_pos[:, 0] + kick_vel[:, 0] * time_to_robot_line
+        predicted_x_local = predicted_x_world - env_origins[:, 0]  # Convert to local
+
+        # Clamp to goal width
+        goal_width = 3.5
+        interception_x_local = predicted_x_local.clamp(-goal_width / 2, goal_width / 2)
+
+        # Store for visualization and for observations/rewards to use
+        self.interception_x_local[env_ids] = interception_x_local
         self.kick_velocity[env_ids] = kick_vel
         self.target_position[env_ids] = target_pos
         self.ball_start_pos[env_ids] = ball_start_pos
@@ -149,12 +172,13 @@ class PenaltyKickCommand(CommandTerm):
     # Visualization
 
     def _debug_vis_impl(self, visualizer: "DebugVisualizer") -> None:
-        """Visualize the penalty kick trajectory.
+        """Visualize the penalty kick trajectory and interception point.
 
         Draws:
         - Kick velocity vector (red arrow from ball position)
         - Trajectory path to target (thin red arrow)
-        - Target marker (small green arrow at target)
+        - Target marker in goal (small green arrow)
+        - INTERCEPTION POINT on goal line (large blue arrow) - where ball crosses goal line
         """
         batch = visualizer.env_idx
 
@@ -180,12 +204,48 @@ class PenaltyKickCommand(CommandTerm):
                 ball_pos, target_pos, color=(1.0, 0.0, 0.0, 0.4), width=0.01
             )
 
-        # Draw target marker (small green arrow at target)
+        # Draw target marker in goal (small green arrow at target)
         target_marker_end = target_pos + torch.tensor(
             [0.0, 0.0, 0.2], device=self.device
         )
         visualizer.add_arrow(
             target_pos, target_marker_end, color=(0.2, 0.8, 0.2, 0.8), width=0.02
+        )
+
+        # ========================================================================
+        # NEW: Draw INTERCEPTION POINT on goal line (where ball crosses Y=-0.5)
+        # This is the X position the robot should move to!
+        # ========================================================================
+        goal_line_y = -0.5
+        env_origins = self._env.scene.env_origins
+        goal_line_y_world = env_origins[batch, 1] + goal_line_y
+
+        # Predict where ball crosses goal line
+        dy = goal_line_y_world - ball_pos[1]
+        ball_vel_y = kick_vel[1].clamp(max=-0.01)
+        time_to_goal = dy / (ball_vel_y - 1e-8)
+
+        # Predicted X at goal line
+        predicted_x = ball_pos[0] + kick_vel[0] * time_to_goal
+        goal_width = 3.5
+        interception_x = predicted_x.clamp(-goal_width / 2, goal_width / 2)
+
+        # Create interception point marker on goal line
+        interception_point = torch.tensor(
+            [interception_x, goal_line_y_world, 0.5],  # At ground + 0.5m height
+            device=self.device,
+        )
+        interception_marker_end = interception_point + torch.tensor(
+            [0.0, 0.0, 0.5], device=self.device
+        )
+
+        # Large BLUE arrow for interception point (this is where robot should go!)
+        visualizer.add_arrow(
+            interception_point,
+            interception_marker_end,
+            color=(0.0, 0.5, 1.0, 1.0),  # Bright blue
+            width=0.05,  # Extra thick to be visible
+            label="Interception",
         )
 
 

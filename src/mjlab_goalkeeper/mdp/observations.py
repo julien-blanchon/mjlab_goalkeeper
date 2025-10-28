@@ -216,33 +216,46 @@ def robot_ball_contact(
     return contact.unsqueeze(-1)  # (num_envs, 1)
 
 
-def hand_position(
+def target_interception_x_position(
     env: ManagerBasedEnv,
-    hand_name: str,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    command_name: str = "penalty_kick",
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Get the position of a robot hand in world frame.
+    """Get target X position from penalty kick command (where to move laterally).
+
+    Returns the X position error in LOCAL coordinates:
+    - Positive = need to move right (+X)
+    - Negative = need to move left (-X)
+    - Zero = already at correct position
+
+    This uses the PenaltyKickCommand's precomputed interception point,
+    avoiding recomputation and ensuring consistency.
 
     Args:
         env: The environment.
-        hand_name: Name of the hand body (e.g., "left_hand_roll_link", "right_hand_roll_link").
-        asset_cfg: Configuration for the robot entity.
+        command_name: Name of penalty kick command.
+        robot_cfg: Robot configuration.
 
     Returns:
-        Position tensor of shape (num_envs, 3).
+        Position error tensor of shape (num_envs, 1). Positive = move right.
     """
-    robot: Entity = env.scene[asset_cfg.name]
+    robot: Entity = env.scene[robot_cfg.name]
 
-    # Find the body index for the hand
-    body_names = robot.body_names
-    if hand_name not in body_names:
-        raise ValueError(
-            f"Hand '{hand_name}' not found in robot. Available bodies: {body_names}"
-        )
+    # Get penalty kick command
+    penalty_kick_term = env.command_manager.get_term(command_name)
+    if penalty_kick_term is None:
+        # Return zeros if command not found
+        return torch.zeros(env.num_envs, 1, device=env.device)
 
-    body_idx = body_names.index(hand_name)
+    # Get target X position from command (already in LOCAL coordinates)
+    target_x_local = penalty_kick_term.interception_x_local  # (num_envs,)
 
-    # Get hand position in world frame
-    hand_pos = robot.data.body_link_pos_w[:, body_idx, :]  # (num_envs, 3)
+    # Get robot X position in LOCAL coordinates
+    env_origins = env.scene.env_origins
+    robot_pos_w = robot.data.root_link_pos_w  # (num_envs, 3)
+    robot_x_local = robot_pos_w[:, 0] - env_origins[:, 0]  # (num_envs,)
 
-    return hand_pos
+    # Compute position error
+    x_error = target_x_local - robot_x_local  # (num_envs,)
+
+    return x_error.unsqueeze(-1)  # (num_envs, 1)

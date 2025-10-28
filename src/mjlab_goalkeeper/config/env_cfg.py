@@ -15,8 +15,8 @@ from mjlab.managers.manager_term_config import CurriculumTermCfg as CurrTerm
 from mjlab.managers.manager_term_config import EventTermCfg as EventTerm
 from mjlab.managers.manager_term_config import ObservationGroupCfg as ObsGroup
 from mjlab.managers.manager_term_config import ObservationTermCfg as ObsTerm
-from mjlab.managers.manager_term_config import RewardTermCfg as RewardTerm
 from mjlab.managers.manager_term_config import TerminationTermCfg as DoneTerm
+from mjlab.managers.manager_term_config import RewardTermCfg as RewardTerm
 from mjlab.managers.manager_term_config import term
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.scene import SceneCfg
@@ -51,8 +51,9 @@ VIEWER_CONFIG = ViewerConfig(
     origin_type=ViewerConfig.OriginType.ASSET_BODY,
     asset_name="robot",
     body_name="",  # Override in robot cfg.
-    distance=3.0,
-    elevation=-5.0,
+    lookat=(0.0, 0.0, 0.0),
+    distance=5.0,
+    elevation=-45.0,
     azimuth=90.0,
 )
 
@@ -89,7 +90,10 @@ class CommandsCfg:
                 -1.5,
                 1.5,
             ),  # Aim ±1.5m left/right in goal (adjusted for 3.5m width)
-            target_z_height=(0.3, 1.7),  # Aim 0.3-1.7m high (adjusted for 2m height)
+            target_z_height=(
+                0.3,
+                1.2,
+            ),  # Aim 0.3-1.2m high (reduced from 1.7 - robot can't reach that high)
             target_y_depth=(-0.8, -0.2),  # Aim into goal depth
             kick_time=(
                 1.2,
@@ -101,8 +105,11 @@ class CommandsCfg:
 
 @dataclass
 class ObservationCfg:
+    """Simplified observations - Matching velocity task + target position."""
+
     @dataclass
     class PolicyCfg(ObsGroup):
+        # Base observations (same as velocity task)
         base_lin_vel: ObsTerm = term(
             ObsTerm,
             func=mjlab_mdp.base_lin_vel,
@@ -128,45 +135,15 @@ class ObservationCfg:
             func=mjlab_mdp.joint_vel_rel,
             noise=Unoise(n_min=-1.5, n_max=1.5),
         )
-
         actions: ObsTerm = term(ObsTerm, func=mjlab_mdp.last_action)
 
-        # Football observations (primary ball for goalkeeper training)
-        # Add small noise for robustness (simulates vision system uncertainty)
-        football_position: ObsTerm = term(
+        # NEW: Target interception X position from command (where to move laterally)
+        # This replaces velocity command in velocity task
+        target_interception_x: ObsTerm = term(
             ObsTerm,
-            func=mdp.entity_position,
-            params={"asset_cfg": SceneEntityCfg("football_ball")},
-            noise=Unoise(n_min=-0.02, n_max=0.02),  # ±2cm noise
-        )
-        football_velocity: ObsTerm = term(
-            ObsTerm,
-            func=mdp.entity_velocity,
-            params={"asset_cfg": SceneEntityCfg("football_ball")},
-            noise=Unoise(n_min=-0.05, n_max=0.05),  # Small velocity noise
-        )
-
-        # Hand positions (for hand-eye coordination)
-        left_hand_position: ObsTerm = term(
-            ObsTerm,
-            func=mdp.hand_position,
-            params={"hand_name": "left_wrist_yaw_link"},
-        )
-        right_hand_position: ObsTerm = term(
-            ObsTerm,
-            func=mdp.hand_position,
-            params={"hand_name": "right_wrist_yaw_link"},
-        )
-
-        # Goal detection and contact observations (1D each)
-        goal_scored: ObsTerm = term(
-            ObsTerm,
-            func=mdp.goal_scored_detection,
-        )
-        robot_ball_contact: ObsTerm = term(
-            ObsTerm,
-            func=mdp.robot_ball_contact,
-            params={"threshold": 0.5},
+            func=mdp.target_interception_x_position,
+            params={"command_name": "penalty_kick"},
+            noise=Unoise(n_min=-0.05, n_max=0.05),  # ±5cm noise for robustness
         )
 
         def __post_init__(self):
@@ -236,114 +213,130 @@ class EventCfg:
 
 @dataclass
 class RewardCfg:
-    # Standard regularizers (from velocity task best practices)
-    pose: RewardTerm = term(
-        RewardTerm,
-        func=mjlab_mdp.posture,
-        weight=1.0,
-        params={
-            "asset_cfg": SceneEntityCfg("robot", joint_names=[".*"]),
-            "std": [],
-        },
-    )
-    dof_pos_limits: RewardTerm = term(
-        RewardTerm, func=mjlab_mdp.joint_pos_limits, weight=-1.0
-    )
-    action_rate_l2: RewardTerm = term(
-        RewardTerm, func=mjlab_mdp.action_rate_l2, weight=-0.1
-    )
-    joint_torques_l2: RewardTerm = term(
-        RewardTerm,
-        func=mjlab_mdp.joint_torques_l2,
-        weight=-0.0001,  # Encourage energy efficiency
-    )
-    flat_orientation: RewardTerm = term(
-        RewardTerm,
-        func=mjlab_mdp.flat_orientation_l2,
-        weight=-0.5,  # Penalize tilting
-    )
+    """Simplified goalkeeper rewards - Tuned to encourage movement.
 
-    # Staying alive/upright reward (continuous encouragement to not fall)
-    # Reduced from 1.0 to 0.4 to reduce "standing still" bias
-    alive: RewardTerm = term(
-        RewardTerm,
-        func=mdp.is_alive,
-        weight=0.4,  # Reduced to encourage movement toward ball
-    )
+    Key insight: Robot was too comfortable standing still. Movement rewards
+    must DOMINATE stability rewards to encourage lateral walking.
+    """
 
-    # New goalkeeper-specific rewards
-    # Increased std from 0.3 to 1.5 for better long-range gradient (ball starts at 10.5m!)
-    hand_to_ball: RewardTerm = term(
+    # POSITION is primary (be at the right place!) - Highest weight
+    position_x: RewardTerm = term(
         RewardTerm,
-        func=mdp.hand_to_ball_distance,
+        func=mdp.position_to_target_x,
+        weight=3.0,  # PRIMARY signal - care most about being positioned correctly
         params={
-            "std": 1.5,  # Larger std gives meaningful gradient at 5-10m distances
-            "left_hand_body": "left_wrist_yaw_link",
-            "right_hand_body": "right_wrist_yaw_link",
-        },
-        weight=5.0,  # Big reward for getting hands close to ball
-    )
-    stabilization_after_contact: RewardTerm = term(
-        RewardTerm,
-        func=mdp.post_contact_stabilization,
-        weight=2.0,  # Reward staying stable after blocking
-        params={
-            "std": 1.0,
-            "contact_memory_steps": 50,  # Reward stabilization for 50 steps (1s) after contact
-            "contact_threshold": 0.5,
-            "nominal_height": 0.76,
-        },
-    )
-    active_save: RewardTerm = term(
-        RewardTerm,
-        func=mdp.goal_prevented_by_robot,
-        weight=10.0,  # Big reward for successful saves!
-        params={
-            "contact_threshold": 0.5,
+            "command_name": "penalty_kick",
+            "std": 0.4,
         },
     )
 
-    # Enabled to teach locomotion! Critical for learning to move toward ball
-    air_time: RewardTerm = term(
+    # VELOCITY teaches walking - Lower weight, slower movement
+    track_velocity: RewardTerm = term(
         RewardTerm,
-        func=mdp.feet_air_time,
-        weight=0.5,  # Enabled! Teaches robot that lifting feet is good
+        func=mdp.track_lateral_velocity_to_target,
+        weight=1.5,  # REDUCED (was 3.0) - just helps learn locomotion
         params={
-            "asset_name": "robot",
-            "threshold_min": 0.05,
-            "threshold_max": 0.15,
-            "command_name": "penalty_kick",  # Use correct command name
-            "command_threshold": 0.0,  # Always enable (no velocity threshold)
-            "sensor_names": [],  # Will be set in __post_init__
-            "reward_mode": "continuous",  # Continuous reward while in air
+            "command_name": "penalty_kick",
+            "std": 0.5,
+            "max_velocity": 0.5,  # SLOWER (was 0.8) - controlled stepping
+            "kp": 1.5,  # REDUCED gain (was 2.5) - gentle velocity commands
         },
+    )
+
+    # Constraints: Stay on line and standing
+    stay_on_line: RewardTerm = term(
+        RewardTerm,
+        func=mdp.stay_on_goal_line_y,
+        weight=1.0,  # Increased (was 0.5) - important constraint
+        params={
+            "target_y": -0.3,
+            "std": 0.2,  # Tighter (was 0.3)
+        },
+    )
+
+    height: RewardTerm = term(
+        RewardTerm,
+        func=mdp.base_height_reward,
+        weight=0.5,  # Increased (was 2.0) - enforce good standing posture
+        params={
+            "target_height": 0.78,
+            "std": 0.1,
+        },
+    )
+
+    # Posture: Moderate weight for natural movement
+    posture: RewardTerm = term(
+        RewardTerm,
+        func=mdp.posture_reward,
+        weight=1.0,  # Increased (was 0.3) - enforce better movement quality
+        params={
+            "std": {
+                # Moderate flexibility for natural walking
+                r".*hip.*": 0.4,
+                r".*knee.*": 0.4,
+                r".*ankle.*": 0.3,
+                r".*waist.*": 0.4,
+                r".*shoulder.*": 0.5,
+                r".*elbow.*": 0.5,
+                r".*wrist.*": 0.5,
+            },
+        },
+    )
+
+    # Penalties: Strong smoothness constraint
+    joint_limits: RewardTerm = term(
+        RewardTerm,
+        func=mdp.joint_limits_penalty,
+        weight=-1.0,
+        params={},
+    )
+
+    action_rate: RewardTerm = term(
+        RewardTerm,
+        func=mjlab_mdp.action_rate_l2,
+        weight=-0.2,  # INCREASED (was -0.05) - strongly penalize jerky movements
+        params={},
     )
 
 
 @dataclass
 class TerminationCfg:
-    time_out: DoneTerm = term(DoneTerm, func=mjlab_mdp.time_out, time_out=True)
+    """Simplified terminations - Based on velocity task.
 
-    # Re-enabled - robot must learn to stay upright
-    # Combined with alive reward, this creates strong incentive to not fall
-    fell_over: DoneTerm = term(
+    Focus: Episode timeout + falling detection.
+    """
+
+    time_out: DoneTerm = term(
         DoneTerm,
-        func=mjlab_mdp.bad_orientation,
-        params={"limit_angle": 1.22},  # 70° in radians (π/180 * 70 ≈ 1.22)
+        func=mjlab_mdp.time_out,
+        time_out=True,
     )
 
-    goal_scored: DoneTerm = term(
+    fell_over: DoneTerm = term(
         DoneTerm,
-        func=mdp.goal_scored_termination,
-        time_out=False,  # This is a success termination, not a timeout
+        func=mdp.fell_over,
+        time_out=False,
+        params={
+            "limit_angle": 1.2217,  # 70 degrees (same as velocity task bad_orientation)
+        },
+    )
+
+    base_too_low: DoneTerm = term(
+        DoneTerm,
+        func=mdp.base_too_low,
+        time_out=False,
+        params={
+            "min_height": 0.55,  # 55cm minimum (G1 standing is ~0.78m, allow some crouch for movement)
+        },
     )
 
 
 @dataclass
 class CurriculumCfg:
-    terrain_levels: CurrTerm | None = term(
-        CurrTerm, func=mdp.terrain_levels_vel, params={"command_name": "twist"}
-    )
+    """No curriculum for now - keep it simple like velocity task without terrain."""
+
+    terrain_levels: CurrTerm | None = None
+    command_vel: CurrTerm | None = None
 
 
 ##
@@ -376,7 +369,7 @@ class UnitreeG1GoalkeeperEnvCfg(ManagerBasedRlEnvCfg):
     sim: SimulationCfg = field(default_factory=lambda: SIM_CFG)
     viewer: ViewerConfig = field(default_factory=lambda: VIEWER_CONFIG)
     decimation: int = 4  # 50 Hz control frequency.
-    episode_length_s: float = 20.0
+    episode_length_s: float = 20.0  # Same as velocity task
 
     def __post_init__(self):
         # Setup G1 robot with contact sensors for feet
@@ -407,7 +400,6 @@ class UnitreeG1GoalkeeperEnvCfg(ManagerBasedRlEnvCfg):
         self.scene.terrain.terrain_generator = None
 
         # Setup foot friction randomization
-        sensor_names = ["left_foot_ground_contact", "right_foot_ground_contact"]
         geom_names = []
         for i in range(1, 8):
             geom_names.append(f"left_foot{i}_collision")
@@ -417,28 +409,6 @@ class UnitreeG1GoalkeeperEnvCfg(ManagerBasedRlEnvCfg):
 
         # Configure action scale
         self.actions.joint_pos.scale = G1_ACTION_SCALE
-
-        # Configure rewards
-        self.rewards.air_time.params["sensor_names"] = sensor_names
-        self.rewards.pose.params["std"] = {
-            # Lower body.
-            r".*hip_pitch.*": 0.3,
-            r".*hip_roll.*": 0.15,
-            r".*hip_yaw.*": 0.15,
-            r".*knee.*": 0.35,
-            r".*ankle_pitch.*": 0.25,
-            r".*ankle_roll.*": 0.1,
-            # Waist.
-            r".*waist_yaw.*": 0.15,
-            r".*waist_roll.*": 0.08,
-            r".*waist_pitch.*": 0.1,
-            # Arms.
-            r".*shoulder_pitch.*": 0.35,
-            r".*shoulder_roll.*": 0.15,
-            r".*shoulder_yaw.*": 0.1,
-            r".*elbow.*": 0.25,
-            r".*wrist.*": 0.3,
-        }
 
         # Configure viewer
         self.viewer.body_name = "torso_link"
